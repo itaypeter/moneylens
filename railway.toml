@@ -1,23 +1,9 @@
 [build]
 builder = "nixpacks"
 
-[[services]]
-name = "backend"
-source = "backend"
+[build.buildCommand]
+cmd = "cd frontend && npm install && npm run build && cd ../backend && npm install"
 
-[services.build]
-buildCommand = "npm install"
-
-[services.deploy]
-startCommand = "node server.js"
+[deploy]
+startCommand = "cd backend && node server.js"
 healthcheckPath = "/health"
-
-[[services]]
-name = "frontend"
-source = "frontend"
-
-[services.build]
-buildCommand = "npm install && npm run build"
-
-[services.deploy]
-startCommand = "npx serve dist -p $PORT"
