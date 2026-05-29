@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "./api.js";
 import Papa from "papaparse";
+import * as XLSX from "xlsx";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, CartesianGrid, LineChart, Line, Legend,
@@ -149,6 +150,53 @@ function parseCSV(text, accountId) {
       amount, account: accountId, category: categorize(row[descCol] || ""),
     };
   }).filter(Boolean);
+}
+
+function parseExcel(buffer, accountId) {
+  const wb = XLSX.read(buffer, { type: "array", cellDates: true });
+  const allRows = [];
+
+  wb.SheetNames.forEach(sheetName => {
+    const ws = wb.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+    if (!rows.length) return;
+
+    const keys = Object.keys(rows[0]);
+    const dateCol = keys.find(k => /date|datum|buchungsdatum|תאריך/i.test(k)) || keys[0];
+    const descCol = keys.find(k => /desc|buchung|besch|text|betreff|memo|verwendung|פירוט|תיאור|סוג/i.test(k)) || keys[1];
+    const amtCol  = keys.find(k => /amount|betrag|credit|debit|summe|total|סכום|זכות|חובה|קרדיט/i.test(k)) || keys[2];
+
+    rows.forEach((row, i) => {
+      let rawAmt = String(row[amtCol] || "0");
+      // Handle negative amounts written as (1,234.56)
+      const neg = rawAmt.startsWith("(") && rawAmt.endsWith(")");
+      rawAmt = rawAmt.replace(/[^\d.\-,]/g, "").replace(",", ".");
+      let amount = parseFloat(rawAmt) || 0;
+      if (neg && amount > 0) amount = -amount;
+      if (amount === 0) return;
+
+      // Format date
+      let date = "";
+      const rawDate = row[dateCol];
+      if (rawDate instanceof Date) {
+        date = rawDate.toISOString().slice(0, 10);
+      } else if (rawDate) {
+        // Try to parse common date formats
+        const d = new Date(rawDate);
+        date = isNaN(d) ? String(rawDate) : d.toISOString().slice(0, 10);
+      }
+
+      const desc = String(row[descCol] || "").trim();
+      allRows.push({
+        id: `${accountId}-xl-${Date.now()}-${i}`,
+        date, desc, amount,
+        account: accountId,
+        category: categorize(desc),
+      });
+    });
+  });
+
+  return allRows.filter(Boolean);
 }
 
 // OCR handled server-side via api.ocrBill / api.ocrGrocery
@@ -409,7 +457,7 @@ export default function App() {
     }
   });
   if (!tips.length && spendByCat.length) tips.push({ level:"ok",icon:"✅",title:"All categories within budget!",desc:"Great spending discipline this month." });
-  if (!spendByCat.length) tips.push({ level:"info",icon:"📥",title:"No transactions imported yet",desc:"Click '+ Import CSV' to load your Neon, SBB, or Max statement." });
+  if (!spendByCat.length) tips.push({ level:"info",icon:"📥",title:"No transactions imported yet",desc:"Click '+ Import CSV / Excel' to load your bank statement." });
   if (taxDocs.length) tips.push({ level:"info",icon:"🏛️",title:`CHF ${taxTotal.toLocaleString()} deductible tracked`,desc:"Don't forget to declare these in your Swiss annual tax return." });
 
   const allCats = ["All",...Object.keys(CAT_COLORS)];
@@ -419,9 +467,21 @@ export default function App() {
 
   const handleCSVFile = file => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = e => setCsvPreview(parseCSV(e.target.result, csvAccId));
-    reader.readAsText(file, "UTF-8");
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (["xlsx","xls","ods"].includes(ext)) {
+      // Excel / ODS path
+      const reader = new FileReader();
+      reader.onload = e => {
+        const buffer = new Uint8Array(e.target.result);
+        setCsvPreview(parseExcel(buffer, csvAccId));
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      // CSV / TXT path
+      const reader = new FileReader();
+      reader.onload = e => setCsvPreview(parseCSV(e.target.result, csvAccId));
+      reader.readAsText(file, "UTF-8");
+    }
   };
   const confirmImport = async () => {
     try {
@@ -534,7 +594,7 @@ export default function App() {
               )}
               <button className="br" onClick={()=>setShowImport(true)}
                 style={{ background:"#C8102E",border:"none",color:"#fff",fontFamily:"Syne",fontWeight:700,fontSize:12,padding:"9px 16px",borderRadius:8,cursor:"pointer",transition:"background 0.18s" }}>
-                + Import CSV
+                + Import CSV / Excel
               </button>
             </div>
           </div>
@@ -585,7 +645,7 @@ export default function App() {
               </select>
             </div>
             {filteredTx.length===0
-              ? <EmptyState icon="📥" title="No transactions" desc={transactions.length?"Try adjusting your filters.":"Click '+ Import CSV' to load your bank statement."} />
+              ? <EmptyState icon="📥" title="No transactions" desc={transactions.length?"Try adjusting your filters.":"Click '+ Import CSV / Excel' to load your bank statement."} />
               : filteredTx.slice(0,150).map(t=>(
                 <div key={t.id} className="hr" style={{ display:"flex",alignItems:"center",gap:12,padding:"10px 13px",background:"#FFFFFF",border:"1px solid #EAE7E1",borderRadius:10,marginBottom:4,transition:"background 0.12s",boxShadow:"0 1px 2px rgba(28,25,23,0.04)" }}>
                   <div style={{ width:34,height:34,borderRadius:8,flexShrink:0,background:`${CAT_COLORS[t.category]||"#4B5563"}18`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:14 }}>
@@ -1373,7 +1433,7 @@ export default function App() {
               </div>
             </div>
             {!csvPreview
-              ? <UploadZone label="Drop your exported CSV here" onFile={handleCSVFile} accept=".csv,.txt" />
+              ? <UploadZone label="Drop CSV, Excel (.xlsx) or ODS file here" onFile={handleCSVFile} accept=".csv,.txt,.xlsx,.xls,.ods" />
               : <>
                 <div style={{ fontFamily:"Syne",fontWeight:700,fontSize:13,color:"#166534",marginBottom:12 }}>✓ {csvPreview.length} transactions detected</div>
                 <div style={{ maxHeight:240,overflowY:"auto",background:"#FAF8F5",borderRadius:8,border:"1px solid #EAE7E1" }}>
@@ -1404,9 +1464,10 @@ export default function App() {
               </>
             }
             <div style={{ marginTop:14,fontFamily:"DM Mono",fontSize:10,color:"#A8A29E",lineHeight:1.9 }}>
-              Neon: App → Profile → Export transactions (CSV)<br/>
-              SBB: my.sbb.ch → My account → Billing → Export<br/>
-              Max: Max app → Account → Statements → Export
+              <b style={{color:"#78716C"}}>Neon:</b> App → Profile → Export transactions (CSV)<br/>
+              <b style={{color:"#78716C"}}>SBB:</b> my.sbb.ch → My account → Billing → Export (CSV)<br/>
+              <b style={{color:"#78716C"}}>Max:</b> Max app → Account → Statements → Export (Excel/CSV)<br/>
+              <b style={{color:"#78716C"}}>Any bank:</b> Excel (.xlsx), CSV, or ODS files all work
             </div>
           </div>
         </div>
